@@ -1,0 +1,90 @@
+version: '3'
+services:
+  db:
+    restart: unless-stopped
+    image: postgres:14-alpine
+    shm_size: 256mb
+    networks:
+      - default
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-U', 'postgres']
+    volumes:
+      - ./postgres14:/var/lib/postgresql/data
+    environment:
+      - 'POSTGRES_HOST_AUTH_METHOD=trust'
+
+  redis:
+    restart: unless-stopped
+    image: redis:7-alpine
+    networks:
+      - default
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+    volumes:
+      - ./redis:/data
+
+  web:
+    image: tootsuite/mastodon
+    restart: unless-stopped
+    env_file: .env.production
+    command: bash -c "rm -f /mastodon/tmp/pids/server.pid; bundle exec rails s -p 3000"
+    networks:
+      - proxy
+      - default
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider --proxy=off localhost:3000/health || exit 1']
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./public/system:/mastodon/public/system
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mastodon.entrypoints=https"
+      - "traefik.http.routers.mastodon.rule=(Host(`mastodon.example.com`))"
+      - "traefik.http.routers.mastodon.tls=true"
+      - "traefik.http.routers.mastodon.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.mastodon.service=mastodon"
+      - "traefik.http.services.mastodon.loadbalancer.server.port=3000"
+      - "traefik.docker.network=proxy"
+
+  streaming:
+    image: tootsuite/mastodon
+    restart: unless-stopped
+    env_file: .env.production
+    command: node ./streaming
+    networks:
+      - default
+      - proxy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider --proxy=off localhost:4000/api/v1/streaming/health || exit 1']
+    depends_on:
+      - db
+      - redis
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mastodon-api.entrypoints=https"
+      - "traefik.http.routers.mastodon-api.rule=(Host(`mastodon.example.com`) && PathPrefix(`/api/v1/streaming`))"
+      - "traefik.http.routers.mastodon-api.tls=true"
+      - "traefik.http.routers.mastodon-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.mastodon-api.service=mastodon-api"
+      - "traefik.http.services.mastodon-api.loadbalancer.server.port=4000"
+      - "traefik.docker.network=proxy"
+
+  sidekiq:
+    image: tootsuite/mastodon
+    restart: unless-stopped
+    env_file: .env.production
+    command: bundle exec sidekiq
+    depends_on:
+      - db
+      - redis
+    networks:
+      - default
+    volumes:
+      - ./public/system:/mastodon/public/system
+    healthcheck:
+      test: ['CMD-SHELL', "ps aux | grep '[s]idekiq\ 6' || false"]
+networks:
+  proxy:
+    external: true
